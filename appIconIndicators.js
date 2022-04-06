@@ -2,7 +2,7 @@ const Cairo = imports.cairo;
 const Clutter = imports.gi.Clutter;
 const GdkPixbuf = imports.gi.GdkPixbuf
 const Gio = imports.gi.Gio;
-const GObject = imports.gi.GObject;
+const Graphene = imports.gi.Graphene;
 const Gtk = imports.gi.Gtk;
 const Main = imports.ui.main;
 const Pango = imports.gi.Pango;
@@ -50,10 +50,10 @@ var AppIconIndicator = class DashToDock_AppIconIndicator {
         let runningIndicatorStyle;
 
         let settings = Docking.DockManager.settings;
-        if (settings.applyCustomTheme) {
+        if (settings.get_boolean('apply-custom-theme' )) {
             runningIndicatorStyle = RunningIndicatorStyle.DOTS;
         } else {
-            runningIndicatorStyle = settings.runningIndicatorStyle;
+            runningIndicatorStyle = settings.get_enum('running-indicator-style');
         }
 
         switch (runningIndicatorStyle) {
@@ -240,22 +240,6 @@ var RunningIndicatorDefault = class DashToDock_RunningIndicatorDefault extends R
     }
 };
 
-var IndicatorDrawingArea = GObject.registerClass(
-class IndicatorDrawingArea extends St.DrawingArea {
-    vfunc_allocate(box) {
-        if (box.x1 != 0 || box.y1 != 0)
-            return super.vfunc_allocate(box);
-
-        // We assume that the are is a rectangle in the operations below:
-        const size = Math.min(box.get_width(), box.get_height());
-        box.x2 = size;
-        box.y2 = size;
-        this.set_allocation(box);
-
-        return super.vfunc_allocate(box);
-    }
-});
-
 var RunningIndicatorDots = class DashToDock_RunningIndicatorDots extends RunningIndicatorBase {
 
     constructor(source) {
@@ -263,18 +247,21 @@ var RunningIndicatorDots = class DashToDock_RunningIndicatorDots extends Running
 
         this._hideDefaultDot();
 
-        this._area = new IndicatorDrawingArea({
-            x_expand: true,
-            y_expand: true,
-        });
+        this._area = new St.DrawingArea({x_expand: true, y_expand: true});
 
         // We draw for the bottom case and rotate the canvas for other placements
-        // set center of rotatoins to the center
+        //set center of rotatoins to the center
         this._area.set_pivot_point(0.5, 0.5);
+        // prepare transformation matrix
+        let m = new Graphene.Matrix();
+        m.init_identity();
+        let v = new Graphene.Vec3();
+        v.init(0, 0, 1);
 
         switch (this._side) {
         case St.Side.TOP:
-            this._area.rotation_angle_z = 180;
+            m.xx = -1;
+            m.rotate(180, v);
             break
 
         case St.Side.BOTTOM:
@@ -282,13 +269,16 @@ var RunningIndicatorDots = class DashToDock_RunningIndicatorDots extends Running
             break;
 
         case St.Side.LEFT:
-            this._area.rotation_angle_z = 90;
+            m.yy = -1;
+            m.rotate(90, v);
             break;
 
         case St.Side.RIGHT:
-            this._area.rotation_angle_z = -90;
+            m.rotate(-90, v);
             break
         }
+
+        this._area.set_transform(m);
 
         this._area.connect('repaint', this._updateIndicator.bind(this));
         this._source._iconContainer.add_child(this._area);
@@ -320,11 +310,11 @@ var RunningIndicatorDots = class DashToDock_RunningIndicatorDots extends Running
         super.update();
 
         // Enable / Disable the backlight of running apps
-        if (!Docking.DockManager.settings.applyCustomTheme &&
-            Docking.DockManager.settings.unityBacklitItems) {
+        if (!Docking.DockManager.settings.get_boolean('apply-custom-theme') &&
+            Docking.DockManager.settings.get_boolean('unity-backlit-items')) {
             const [icon] = this._source._iconContainer.get_children();
             icon.set_style(
-                Docking.DockManager.settings.applyGlossyEffect ?
+                Docking.DockManager.settings.get_boolean('apply-glossy-effect') ?
                 this._glossyBackgroundStyle : null);
             if (this._source.running)
                 this._enableBacklight();
@@ -353,9 +343,9 @@ var RunningIndicatorDots = class DashToDock_RunningIndicatorDots extends Running
         this._bodyColor = themeNode.get_background_color();
 
         let settings = Docking.DockManager.settings;
-        if (!settings.applyCustomTheme) {
+        if (!settings.get_boolean('apply-custom-theme')) {
             // Adjust for the backlit case
-            if (settings.unityBacklitItems) {
+            if (settings.get_boolean('unity-backlit-items')) {
                 // Use dominant color for dots too if the backlit is enables
                 let colorPalette = this._dominantColorExtractor._getColorPalette();
 
@@ -373,7 +363,7 @@ var RunningIndicatorDots = class DashToDock_RunningIndicatorDots extends Running
             }
 
             // Apply dominant color if requested
-            if (settings.runningIndicatorDominantColor) {
+            if (settings.get_boolean('running-indicator-dominant-color')) {
                 let colorPalette = this._dominantColorExtractor._getColorPalette();
                 if (colorPalette !== null) {
                     this._bodyColor = Clutter.color_from_string(colorPalette.original)[1];
@@ -381,10 +371,10 @@ var RunningIndicatorDots = class DashToDock_RunningIndicatorDots extends Running
             }
 
             // Finally, use customize style if requested
-            if (settings.customThemeCustomizeRunningDots) {
-                this._borderColor = Clutter.color_from_string(settings.customThemeRunningDotsBorderColor)[1];
-                this._borderWidth = settings.customThemeRunningDotsBorderWidth;
-                this._bodyColor =  Clutter.color_from_string(settings.customThemeRunningDotsColor)[1];
+            if (settings.get_boolean('custom-theme-customize-running-dots')) {
+                this._borderColor = Clutter.color_from_string(settings.get_string('custom-theme-running-dots-border-color'))[1];
+                this._borderWidth = settings.get_int('custom-theme-running-dots-border-width');
+                this._bodyColor =  Clutter.color_from_string(settings.get_string('custom-theme-running-dots-color'))[1];
             }
         }
 
@@ -441,8 +431,8 @@ var RunningIndicatorCiliora = class DashToDock_RunningIndicatorCiliora extends R
             let lineLength = this._width - (size*(this._number-1)) - (spacing*(this._number-1));
             let padding = this._borderWidth;
             // For the backlit case here we don't want the outer border visible
-            if (Docking.DockManager.settings.unityBacklitItems &&
-                !Docking.DockManager.settings.customThemeCustomizeRunningDots)
+            if (Docking.DockManager.settings.get_boolean('unity-backlit-items') &&
+                !Docking.DockManager.settings.get_boolean('custom-theme-customize-running-dots'))
                 padding = 0;
             let yOffset = this._height - padding - size;
 
@@ -476,8 +466,8 @@ var RunningIndicatorSegmented = class DashToDock_RunningIndicatorSegmented exten
             let lineLength = this._width - (size*(this._number-1)) - (spacing*(this._number-1));
             let padding = this._borderWidth;
             // For the backlit case here we don't want the outer border visible
-            if (Docking.DockManager.settings.unityBacklitItems &&
-                !Docking.DockManager.settings.customThemeCustomizeRunningDots)
+            if (Docking.DockManager.settings.get_boolean('unity-backlit-items') &&
+                !Docking.DockManager.settings.get_boolean('custom-theme-customize-running-dots'))
                 padding = 0;
             let yOffset = this._height - padding - size;
 
@@ -506,8 +496,8 @@ var RunningIndicatorSolid = class DashToDock_RunningIndicatorSolid extends Runni
             let size =  Math.max(this._width/20, this._borderWidth);
             let padding = this._borderWidth;
             // For the backlit case here we don't want the outer border visible
-            if (Docking.DockManager.settings.unityBacklitItems &&
-                !Docking.DockManager.settings.customThemeCustomizeRunningDots)
+            if (Docking.DockManager.settings.get_boolean('unity-backlit-items') &&
+                !Docking.DockManager.settings.get_boolean('custom-theme-customize-running-dots'))
                 padding = 0;
             let yOffset = this._height - padding - size;
 
@@ -598,8 +588,8 @@ var RunningIndicatorMetro = class DashToDock_RunningIndicatorMetro extends Runni
             let size =  Math.max(this._width/20, this._borderWidth);
             let padding = 0;
             // For the backlit case here we don't want the outer border visible
-            if (Docking.DockManager.settings.unityBacklitItems &&
-                !Docking.DockManager.settings.customThemeCustomizeRunningDots)
+            if (Docking.DockManager.settings.get_boolean('unity-backlit-items') &&
+                !Docking.DockManager.settings.get_boolean('custom-theme-customize-running-dots'))
                 padding = 0;
             let yOffset = this._height - padding - size;
 
