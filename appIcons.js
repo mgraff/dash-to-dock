@@ -125,7 +125,7 @@ var DockAbstractAppIcon = GObject.registerClass({
         // of any application opened or moved to a different desktop),
         // we restrict this signal to  the case when 'isolate-monitors' is true,
         // and if there are at least 2 monitors.
-        if (Docking.DockManager.settings.isolateMonitors &&
+        if (Docking.DockManager.settings.get_boolean('isolate-monitors') &&
             Main.layoutManager.monitors.length > 1) {
             this._signalsHandler.removeWithLabel('isolate-monitors');
             this._signalsHandler.addWithLabel('isolate-monitors',
@@ -187,6 +187,7 @@ var DockAbstractAppIcon = GObject.registerClass({
 
         this._updateState();
         this._numberOverlay();
+        this.updateIconGeometry();
 
         this._previewMenuManager = null;
         this._previewMenu = null;
@@ -213,7 +214,7 @@ var DockAbstractAppIcon = GObject.registerClass({
 
     vfunc_scroll_event(scrollEvent) {
         let settings = Docking.DockManager.settings;
-        let isEnabled = settings.scrollAction === scrollAction.CYCLE_WINDOWS;
+        let isEnabled = settings.get_enum('scroll-action') === scrollAction.CYCLE_WINDOWS;
         if (!isEnabled)
             return Clutter.EVENT_PROPAGATE;
 
@@ -298,12 +299,15 @@ var DockAbstractAppIcon = GObject.registerClass({
         this._urgentWindows.clear();
         if (interestingWindows === undefined)
             interestingWindows = this.getInterestingWindows();
-        interestingWindows.filter(isWindowUrgent).forEach(win => this._addUrgentWindow(win));
+        interestingWindows.forEach(win => {
+            if (win.urgent || win.demandsAttention || win._manualUrgency)
+                this._addUrgentWindow(win);
+        });
         this.urgent = !!this._urgentWindows.size;
     }
 
     _onWindowDemandsAttention(window) {
-        if (this.ownsWindow(window) && isWindowUrgent(window))
+        if (this.ownsWindow(window))
             this._addUrgentWindow(window);
     }
 
@@ -320,7 +324,7 @@ var DockAbstractAppIcon = GObject.registerClass({
         this.urgent = true;
 
         const onDemandsAttentionChanged = () => {
-            if (!isWindowUrgent(window))
+            if (!window.demandsAttention && !window.urgent && !window._manualUrgency)
                 this._updateUrgentWindows();
         };
 
@@ -356,7 +360,7 @@ var DockAbstractAppIcon = GObject.registerClass({
         [rect.width, rect.height] = this.get_transformed_size();
 
         let windows = this.getWindows();
-        if (Docking.DockManager.settings.multiMonitor) {
+        if (Docking.DockManager.settings.get_boolean('multi-monitor')) {
             let monitorIndex = this.monitorIndex;
             windows = windows.filter(function(w) {
                 return w.get_monitor() == monitorIndex;
@@ -381,12 +385,7 @@ var DockAbstractAppIcon = GObject.registerClass({
         if (!this._menu) {
             this._menu = new DockAppIconMenu(this);
             this._menu.connect('activate-window', (menu, window) => {
-                if (window) {
-                    Main.activateWindow(window);
-                } else {
-                    Main.overview.hide();
-                    Main.panel.closeCalendar();
-                }
+                Main.activateWindow(window);
             });
             this._menu.connect('open-state-changed', (menu, isPoppedUp) => {
                 if (!isPoppedUp)
@@ -452,15 +451,15 @@ var DockAbstractAppIcon = GObject.registerClass({
         let settings = Docking.DockManager.settings;
         if (button && button == 2 ) {
             if (modifiers & Clutter.ModifierType.SHIFT_MASK)
-                buttonAction = settings.shiftMiddleClickAction;
+                buttonAction = settings.get_enum('shift-middle-click-action');
             else
-                buttonAction = settings.middleClickAction;
+                buttonAction = settings.get_enum('middle-click-action');
         }
         else if (button && button == 1) {
             if (modifiers & Clutter.ModifierType.SHIFT_MASK)
-                buttonAction = settings.shiftClickAction;
+                buttonAction = settings.get_enum('shift-click-action');
             else
-                buttonAction = settings.clickAction;
+                buttonAction = settings.get_enum('click-action');
         }
 
         // We check if the app is running, and that the # of windows is > 0 in
@@ -658,10 +657,26 @@ var DockAbstractAppIcon = GObject.registerClass({
     // particular, if the application doens't allow to launch a new window, activate
     // the existing window instead.
     launchNewWindow(p) {
-        if (this.app.state === Shell.AppState.RUNNING &&
-            this.app.can_open_new_window()) {
+        let appInfo = this.app.get_app_info();
+        let actions = appInfo.list_actions();
+        if (this.app.can_open_new_window()) {
             this.animateLaunch();
-            this.app.open_new_window(-1);
+            // This is used as a workaround for a bug resulting in no new windows being opened
+            // for certain running applications when calling open_new_window().
+            //
+            // https://bugzilla.gnome.org/show_bug.cgi?id=756844
+            //
+            // Similar to what done when generating the popupMenu entries, if the application provides
+            // a "New Window" action, use it instead of directly requesting a new window with
+            // open_new_window(), which fails for certain application, notably Nautilus.
+            if (actions.indexOf('new-window') == -1) {
+                this.app.open_new_window(-1);
+            }
+            else {
+                let i = actions.indexOf('new-window');
+                if (i !== -1)
+                    this.app.launch_action(actions[i], global.get_current_time(), -1);
+            }
         }
         else {
             // Try to manually activate the first window. Otherwise, when the app is activated by
@@ -744,8 +759,8 @@ var DockAbstractAppIcon = GObject.registerClass({
     _activateAllWindows() {
         // First activate first window so workspace is switched if needed.
         // We don't do this if isolation is on!
-        if (!Docking.DockManager.settings.isolateWorkspaces &&
-            !Docking.DockManager.settings.isolateMonitors)
+        if (!Docking.DockManager.settings.get_boolean('isolate-workspaces') &&
+            !Docking.DockManager.settings.get_boolean('isolate-monitors'))
             this.app.activate();
 
         // then activate all other app windows in the current workspace
@@ -789,7 +804,7 @@ var DockAbstractAppIcon = GObject.registerClass({
 
         // If there isn't already a list of windows for the current app,
         // or the stored list is outdated, use the current windows list.
-        let monitorIsolation = Docking.DockManager.settings.isolateMonitors;
+        let monitorIsolation = Docking.DockManager.settings.get_boolean('isolate-monitors');
         if (!recentlyClickedApp ||
             recentlyClickedApp.get_id() != this.app.get_id() ||
             recentlyClickedAppWindows.length != app_windows.length ||
@@ -886,6 +901,8 @@ function makeAppIcon(app, monitorIndex, iconAnimator) {
     return new DockAppIcon(app, monitorIndex, iconAnimator);
 }
 
+let discreteGpuAvailable = AppDisplay.discreteGpuAvailable;
+
 /**
  * DockAppIconMenu
  *
@@ -909,6 +926,7 @@ const DockAppIconMenu = class DockAppIconMenu extends PopupMenu.PopupMenu {
         this._parentalControlsManager = ParentalControlsManager.getDefault();
 
         this.actor.add_style_class_name('app-menu');
+        this.actor.add_style_class_name('app-well-menu');
         this.actor.add_style_class_name('dock-app-menu');
 
         // Chain our visibility and lifecycle to that of the source
@@ -941,6 +959,21 @@ const DockAppIconMenu = class DockAppIconMenu extends PopupMenu.PopupMenu {
                 onDynamicSection
             ]);
         }
+
+        if (discreteGpuAvailable === undefined) {
+            const updateDiscreteGpuAvailable = () => {
+                const switcherooProxy = global.get_switcheroo_control();
+                if (switcherooProxy) {
+                    const prop = switcherooProxy.get_cached_property('HasDualGpu');
+                    discreteGpuAvailable = prop?.unpack() ?? false;
+                } else {
+                    discreteGpuAvailable = false;
+                }
+            }
+            updateDiscreteGpuAvailable();
+            global.connect('notify::switcheroo-control',
+                () => updateDiscreteGpuAvailable());
+        }
     }
 
     _appendSeparator() {
@@ -961,7 +994,7 @@ const DockAppIconMenu = class DockAppIconMenu extends PopupMenu.PopupMenu {
     _rebuildMenu() {
         this.removeAll();
 
-        if (Docking.DockManager.settings.showWindowsPreview) {
+        if (Docking.DockManager.settings.get_boolean('show-windows-preview')) {
             // Display the app windows menu items and the separator between windows
             // of the current desktop and other windows.
 
@@ -1005,7 +1038,7 @@ const DockAppIconMenu = class DockAppIconMenu extends PopupMenu.PopupMenu {
                 this._appendSeparator();
             }
 
-            if (Docking.DockManager.getDefault().discreteGpuAvailable &&
+            if (discreteGpuAvailable &&
                 this._source.app.state == Shell.AppState.STOPPED) {
                 const appPrefersNonDefaultGPU = appInfo.get_boolean('PrefersNonDefaultGPU');
                 const gpuPref = appPrefersNonDefaultGPU
@@ -1094,8 +1127,10 @@ const DockAppIconMenu = class DockAppIconMenu extends PopupMenu.PopupMenu {
 
         // quit menu
         this._appendSeparator();
-        this._quitMenuItem = this._appendMenuItem(_('Quit'));
-        this._quitMenuItem.connect('activate', () => this._source.closeAllWindows());
+        this._quitfromDashMenuItem = this._appendMenuItem(_('Quit'));
+        this._quitfromDashMenuItem.connect('activate', () => {
+            this._source.closeAllWindows();
+        });
 
         this.update();
     }
@@ -1105,18 +1140,19 @@ const DockAppIconMenu = class DockAppIconMenu extends PopupMenu.PopupMenu {
     update() {
       // update, show or hide the quit menu
       if (this._source.windowsCount > 0) {
+          let quitFromDashMenuText = "";
           if (this._source.windowsCount == 1)
-              this._quitMenuItem.label.set_text(_('Quit'));
+              this._quitfromDashMenuItem.label.set_text(_('Quit'));
           else
-              this._quitMenuItem.label.set_text(__('Quit %d Windows').format(
-                  this._source.windowsCount));
+              this._quitfromDashMenuItem.label.set_text(__('Quit %d Windows').format(this._source.windowsCount));
 
-          this._quitMenuItem.actor.show();
+          this._quitfromDashMenuItem.actor.show();
+
       } else {
-          this._quitMenuItem.actor.hide();
+          this._quitfromDashMenuItem.actor.hide();
       }
 
-      if (Docking.DockManager.settings.showWindowsPreview){
+      if (Docking.DockManager.settings.get_boolean('show-windows-preview')){
           const windows = this._source.getInterestingWindows();
 
           // update, show, or hide the allWindows menu
@@ -1185,10 +1221,6 @@ const DockAppIconMenu = class DockAppIconMenu extends PopupMenu.PopupMenu {
     }
 };
 
-function isWindowUrgent(w) {
-    return w.urgent || w.demandsAttention || w._manualUrgency;
-}
-
 // Filter out unnecessary windows, for instance
 // nautilus desktop window.
 function getInterestingWindows(windows, monitorIndex) {
@@ -1196,16 +1228,17 @@ function getInterestingWindows(windows, monitorIndex) {
 
     // When using workspace isolation, we filter out windows
     // that are neither in the current workspace nor marked urgent
-    if (settings.isolateWorkspaces) {
-        const showUrgent = settings.workspaceAgnosticUrgentWindows;
-        const activeWorkspace = global.workspace_manager.get_active_workspace();
+    if (settings.get_boolean('isolate-workspaces')) {
+        const showUrgent = settings.get_boolean('workspace-agnostic-urgent-windows');
+        const activeWorkspace = global.workspace_manager.get_active_workspace_index();
         windows = windows.filter(function(w) {
-            const inWorkspace = w.get_workspace() === activeWorkspace;
-            return inWorkspace || (showUrgent && isWindowUrgent(w));
+            const inWorkspace = w.get_workspace().index() === activeWorkspace;
+            const isUrgent = w.urgent || w.demandsAttention || w._manualUrgency;
+            return inWorkspace || (showUrgent && isUrgent);
         });
     }
 
-    if (settings.isolateMonitors) {
+    if (settings.get_boolean('isolate-monitors')) {
         windows = windows.filter(function(w) {
             return w.get_monitor() === monitorIndex;
         });
